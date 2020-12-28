@@ -15,8 +15,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.*;
 
 @Service
 @Slf4j
@@ -36,41 +35,42 @@ public class VoucherServiceImpl implements VoucherService {
     @Override
     @HystrixCommand(fallbackMethod = "buildFallbackVoucher", commandProperties={@HystrixProperty(name="execution.isolation.thread.timeoutInMilliseconds", value="3000")})
     public ResponseEntity getVoucher(String phoneNumber) {
-        ResponseEntity<VoucherProjection> response = restTemplate.exchange(uri, HttpMethod.GET, null, VoucherProjection.class);
-        if (HttpStatus.OK.equals(response.getStatusCode())){
-            VoucherProjection voucher = response.getBody();
-            voucher.setPhoneNumber(phoneNumber);
-            return ResponseEntity.ok(voucher);
-        } else {
-            VoucherProjection voucher = new VoucherProjection();
-            voucher.setPhoneNumber(phoneNumber);
-            voucher.setCode("The request is being processed within 30 seconds.");
-            saveDelayVoucher(phoneNumber);
-            return ResponseEntity.ok(voucher);
-        }
-    }
+        Callable<VoucherProjection> task = ()->{
+            ResponseEntity<VoucherProjection> response = restTemplate.exchange(uri, HttpMethod.GET, null, VoucherProjection.class);
+            VoucherProjection voucherProjection = response.getBody();
+            voucherProjection.setPhoneNumber(phoneNumber);
 
-    private void saveDelayVoucher(String phoneNumber) {
-        Runnable task = () ->{
-            ResponseEntity<VoucherProjection> delayResponse = restTemplate.exchange(uri, HttpMethod.GET, null, VoucherProjection.class);
-            if (HttpStatus.OK.equals(delayResponse.getStatusCode())){
-                VoucherProjection delayVoucherProjection = delayResponse.getBody();
-                Voucher delayVoucher = new Voucher();
-                delayVoucher.setId(UUID.randomUUID().toString());
-                delayVoucher.setCode(delayVoucherProjection.getCode());
-                delayVoucher.setPhoneNumber(phoneNumber);
-                log.info(String.format("Save voucher %s for phone number %s", delayVoucherProjection.getCode(), phoneNumber));
-                voucherRepository.save(delayVoucher);
-            }
+            Voucher voucher = new Voucher();
+            voucher.setId(UUID.randomUUID().toString());
+            voucher.setCode(voucherProjection.getCode());
+            voucher.setPhoneNumber(phoneNumber);
+            log.info(String.format("Save voucher %s for phone number %s", voucher.getCode(), phoneNumber));
+            voucherRepository.save(voucher);
+            return voucherProjection;
         };
-        executor.execute(task);
+
+        Future<VoucherProjection> future = executor.submit(task);
+        try {
+            VoucherProjection voucherProjection = future.get(120, TimeUnit.SECONDS);
+            return ResponseEntity.ok(voucherProjection);
+        } catch (InterruptedException e) {
+            if(!future.isDone()){
+                // because it already running, then set mayInterruptIfRunning will continue the task, so we call just 1 time
+                future.cancel(false);
+                log.info(String.format("Continue get voucher for phone number %s", phoneNumber));
+            }
+        } catch (ExecutionException e) {
+            log.error(String.format("Exception when get voucher for phone number %s, error: %s ", phoneNumber, e.getMessage()));
+        } catch (TimeoutException e) {
+            log.error(String.format("More than 120s but can't get any voucher for phone number %s", phoneNumber));
+        }
+        return buildFallbackVoucher(phoneNumber);
     }
 
     public ResponseEntity buildFallbackVoucher(String phoneNumber) {
         VoucherProjection voucher = new VoucherProjection();
         voucher.setPhoneNumber(phoneNumber);
         voucher.setCode("The request is being processed within 30 seconds.");
-        saveDelayVoucher(phoneNumber);
         return ResponseEntity.ok(voucher);
     }
 
