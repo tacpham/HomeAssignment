@@ -1,5 +1,3 @@
-github.com/voucherifyio/voucher-code-generator-java/
-
 Demo application for assignment v2
 
 1. With  requirements I create some service:
